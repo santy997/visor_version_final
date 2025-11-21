@@ -14,6 +14,7 @@
       padding: 6px 8px; 
       font: 14px Arial; 
       box-shadow: 0 0 15px rgba(0,0,0,0.2); 
+	   bottom: 40px;
     }
 
     /* 🔍 Estilos del buscador */
@@ -46,10 +47,25 @@
       font-size: 18px;
       margin-left: 5px;
     }
+	h3 {
+      position: absolute;
+      top: 10px;
+      left: 10px;
+      z-index: 1002;
+      background: rgba(255,255,255,0.8);
+      padding: 4px 8px;
+      border-radius: 4px;
+      font-family: Arial;
+      margin: 0;
+	   font-size: 14px;
+    }
+	.leaflet-control-container .leaflet-top {
+    top: 50px !important;
+}
   </style>
 </head>
 <body>
-  <h3 style="margin:4px; font-family:Arial;">Mapa del Conurbano: Índice de Riesgo, Basurales y Cursos de Agua</h3>
+  <h3>Mapa del Conurbano: Índice de Riesgo, Basurales y Cursos de Agua</h3>
 
   <!-- 🔍 Barra de búsqueda -->
   <div id="searchBox">
@@ -160,9 +176,9 @@
     legend.onAdd = function () {
       var div = L.DomUtil.create("div", "legend");
       div.innerHTML =
-        "<b>Índice de riesgo</b><br>" +
-        "<i style='background:#4CAF50; width:18px; height:18px; float:left; margin-right:6px; opacity:0.7;'></i> Bajo (0.00–0.22)<br>" +
-        "<i style='background:#FFEB3B; width:18px; height:18px; float:left; margin-right:6px; opacity:0.7;'></i> Medio (0.22–0.45)<br>" +
+        "<b>Índice de riesgo</b><p>" +
+        "<i style='background:#4CAF50; width:18px; height:18px; float:left; margin-right:6px; opacity:0.7;'></i> Bajo (0.00–0.22)<p>" +
+        "<i style='background:#FFEB3B; width:18px; height:18px; float:left; margin-right:6px; opacity:0.7;'></i> Medio (0.22–0.45)<p>" +
         "<i style='background:#F44336; width:18px; height:18px; float:left; margin-right:6px; opacity:0.7;'></i> Alto (≥0.45)";
       return div;
     };
@@ -170,42 +186,122 @@
 
     // 🔍 Buscador de direcciones
     let marcador = null;
-    async function buscarDireccion() {
-      const direccion = document.getElementById('searchInput').value.trim();
-      if (!direccion) return alert("Escribí una dirección para buscar.");
+	   async function buscarDireccion() {
+		const entrada = document.getElementById("searchInput").value.trim();
+		if (!entrada) return alert("Escribí una dirección para buscar.");
 
-      const url = `https://nominatim.openstreetmap.org/search?format=json&q=${encodeURIComponent(direccion)}&addressdetails=1&limit=1`;
+		// Parámetros que enviaremos al normalizador USIG
+		const params = new URLSearchParams({
+			direccion: entrada,
+			geocodificar: "TRUE",        // pedir coordenadas
+			tipoResultado: "calle_altura",
+			maxOptions: "3",
+			srid: "4326"                 // devolver en WGS84 (lat/lon)
+		});
 
-      try {
-        const resp = await fetch(url, { headers: { 'User-Agent': 'VisorConurbano/1.0' } });
-        const data = await resp.json();
+		const url = `https://servicios.usig.buenosaires.gob.ar/normalizar/?${params.toString()}`;
 
-        if (data.length === 0) {
-          alert("No se encontró la dirección.");
-          return;
-        }
+		try 
+		{
+			const resp = await fetch(url, { method: "GET" });
+			if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
 
-        const lat = parseFloat(data[0].lat);
-        const lon = parseFloat(data[0].lon);
-        const displayName = data[0].display_name;
+			const data = await resp.json();
 
-        // Centrar mapa sin perder visibilidad de capas
-        map.setView([lat, lon], 12);  // zoom 12 para ver contexto
-        if (marcador) marcador.remove();
-        marcador = L.marker([lat, lon], { riseOnHover: true }).addTo(map)
-          .bindPopup(`<b>${displayName}</b><br>Lat: ${lat.toFixed(5)}<br>Lon: ${lon.toFixed(5)}`)
-          .openPopup();
-      } catch(e) {
-        alert("Error al buscar dirección.");
-        console.error(e);
-      }
-    }
+			// Función auxiliar para buscar coordenadas en la respuesta (x,y o coordenadas)
+			function encontrarCoordenadas(obj) {
+				if (!obj || typeof obj !== "object") return null;
+
+				// caso directo: objeto con coordenadas
+				if (obj.coordenadas && (obj.coordenadas.x !== undefined || obj.coordenadas.y !== undefined)) {
+					return { lon: parseFloat(obj.coordenadas.x), lat: parseFloat(obj.coordenadas.y) };
+				}
+
+				// caso directo: propiedades x / y sueltas
+				if (obj.x !== undefined && obj.y !== undefined) {
+					return { lon: parseFloat(obj.x), lat: parseFloat(obj.y) };
+				}
+
+				// buscar en arrays u objetos anidados
+				for (const k of Object.keys(obj)) {
+					const v = obj[k];
+					if (Array.isArray(v)) {
+						for (const item of v) {
+							const c = encontrarCoordenadas(item);
+							if (c) return c;
+						}
+					} 
+					else if (typeof v === "object" && v !== null) {
+						const c = encontrarCoordenadas(v);
+						if (c) return c;
+					}
+				}
+				return null;
+			}
+
+			// 1) Primera estrategia: buscar coordenadas en la raíz o en campos esperables
+			let coords = encontrarCoordenadas(data);
+
+			// 2) Si no encontró, intentar interpretar objetos comunes de "normalizador"
+			if (!coords) {
+				// si devuelve una lista de opciones (ej: 'resultados' o 'direcciones'), probar con la primera
+				const posiblesArrays = ["resultados", "direcciones", "options", "candidates", "direccionesCoincidentes"];
+				for (const name of posiblesArrays) {
+					if (Array.isArray(data[name]) && data[name].length > 0) {
+						coords = encontrarCoordenadas(data[name][0]);
+						if (coords) break;
+					}
+				}
+			}
+
+			if (!coords) {
+				console.warn("Respuesta USIG (sin coordenadas detectables):", data);
+				return alert("USIG no devolvió coordenadas para esa dirección.");
+			}
+
+			const lat = coords.lat, lon = coords.lon;
+
+			// Mostrar en el mapa
+			map.setView([lat, lon], 17);
+			if (marcador) marcador.remove();
+			// tratar de obtener un nombre legible de la respuesta (si existe)
+			let display = entrada;
+			if (data.direccion_norm && data.direccion_norm.direccion) display = data.direccion_norm.direccion;
+			else if (data.direccion && typeof data.direccion === "string") display = data.direccion;
+			else {
+				// buscar algún texto descriptivo en la respuesta
+				const posiblesTextos = ["display_name", "nombre", "direccion", "calle", "descripcion"];
+				for (const k of posiblesTextos) {
+					if (data[k] && typeof data[k] === "string") { display = data[k]; break; }
+				}
+			}
+
+			marcador = L.marker([lat, lon]).addTo(map).bindPopup(`<b>${display}</b><br>`).openPopup();
+
+		} 
+		catch (err) {
+			console.error("Error consultando USIG (normalizar):", err);
+			if (err.message && err.message.includes("CORS")) {
+				alert("Error de CORS al consultar USIG desde el navegador. Probá mediante un proxy/backend o habilitando CORS en el servidor.");
+			} 
+			else {
+				alert("Error al consultar USIG. Mirá la consola para más detalles.");
+			}
+		}
+	
+	}
 
     document.getElementById('searchButton').addEventListener('click', buscarDireccion);
-    document.getElementById('searchInput').addEventListener('keypress', e => {
-      if (e.key === 'Enter') buscarDireccion();
+    document.getElementById('searchInput').addEventListener('keypress', e => { if (e.key === 'Enter') buscarDireccion(); });
+	
+    
+    // 🔧 Solución clave para WebViewer
+    window.addEventListener('resize', function() {
+      map.invalidateSize();
     });
 
+    // 🔧 Redibuja el mapa después de cargar la pantalla
+    setTimeout(() => map.invalidateSize(), 1000);
   </script>
 </body>
 </html>
